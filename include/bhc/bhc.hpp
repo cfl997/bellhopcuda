@@ -58,6 +58,20 @@ namespace bhc {
 template<bool O3D, bool R3D> bool setup(
     const bhcInit &init, bhcParams<O3D> &params, bhcOutputs<O3D, R3D> &outputs);
 
+/*
+ * 不读取任何文件的初始化入口。仅执行内存分配和模块 Init，不调用 Read/Default。
+ * 调用方需手动填写 params 再调用 run()。
+ */
+template<bool O3D, bool R3D> bool setup_nofile(
+    const bhcInit &init, bhcParams<O3D> &params, bhcOutputs<O3D, R3D> &outputs);
+
+extern template BHC_API bool setup_nofile<false, false>(
+    const bhcInit &init, bhcParams<false> &params, bhcOutputs<false, false> &outputs);
+extern template BHC_API bool setup_nofile<true, false>(
+    const bhcInit &init, bhcParams<true> &params, bhcOutputs<true, false> &outputs);
+extern template BHC_API bool setup_nofile<true, true>(
+    const bhcInit &init, bhcParams<true> &params, bhcOutputs<true, true> &outputs);
+
 /// 2D version, see template.
 extern template BHC_API bool setup<false, false>(
     const bhcInit &init, bhcParams<false> &params, bhcOutputs<false, false> &outputs);

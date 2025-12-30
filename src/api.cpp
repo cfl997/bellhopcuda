@@ -191,6 +191,85 @@ template<bool O3D> void setupGPU(const bhcParams<O3D> &params)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+template<bool O3D, bool R3D> static bool setup_common_alloc(
+    const bhcInit &init, bhcParams<O3D> &params, bhcOutputs<O3D, R3D> &outputs,
+    module::ModulesList<O3D> &modules, mode::ModesList<O3D, R3D> &modes)
+{
+    params.internal = new bhcInternal(init, O3D, R3D);
+
+    Stopwatch sw(GetInternal(params));
+    sw.tick();
+
+    if(GetInternal(params)->maxMemory < 8000000u) {
+        EXTERR(
+            "%d bytes is an unreasonably small amount of memory to "
+            "ask " BHC_PROGRAMNAME " to limit itself to",
+            GetInternal(params)->maxMemory);
+    }
+#ifdef BHC_BUILD_CUDA
+    setupGPU(params);
+#endif
+
+    // Allocate main structs
+    params.Bdry     = nullptr;
+    params.bdinfo   = nullptr;
+    params.refl     = nullptr;
+    params.ssp      = nullptr;
+    params.atten    = nullptr;
+    params.Pos      = nullptr;
+    params.Angles   = nullptr;
+    params.freqinfo = nullptr;
+    params.Beam     = nullptr;
+    params.sbp      = nullptr;
+    outputs.rayinfo = nullptr;
+    outputs.eigen   = nullptr;
+    outputs.arrinfo = nullptr;
+    trackallocate(params, "data structures", params.Bdry);
+    trackallocate(params, "data structures", params.bdinfo);
+    trackallocate(params, "data structures", params.refl);
+    trackallocate(params, "data structures", params.ssp);
+    trackallocate(params, "data structures", params.atten);
+    trackallocate(params, "data structures", params.Pos);
+    trackallocate(params, "data structures", params.Angles);
+    trackallocate(params, "data structures", params.freqinfo);
+    trackallocate(params, "data structures", params.Beam);
+    trackallocate(params, "data structures", params.sbp);
+    trackallocate(params, "data structures", outputs.rayinfo);
+    trackallocate(params, "data structures", outputs.eigen);
+    trackallocate(params, "data structures", outputs.arrinfo);
+
+    for(auto *m : modules.list()) m->Init(params);
+    for(auto *m : modes.list()) m->Init(outputs);
+
+    return true;
+}
+
+template<bool O3D, bool R3D> bool setup_nofile(
+    const bhcInit &init, bhcParams<O3D> &params, bhcOutputs<O3D, R3D> &outputs)
+{
+    try {
+        module::ModulesList<O3D> modules;
+        mode::ModesList<O3D, R3D> modes;
+        if(!setup_common_alloc<O3D, R3D>(init, params, outputs, modules, modes)) {
+            return false;
+        }
+
+        // 不读文件，但填充默认值，保证后续 echo/run 的 Validate 不会因未初始化而崩。
+        for(auto *m : modules.list()) {
+            m->SetupPre(params);
+            m->Default(params);
+            m->SetupPost(params);
+        }
+        for(auto *m : modules.list()) {
+            m->Validate(params);
+        }
+        return true;
+    } catch(const std::exception &e) {
+        EXTWARN("Exception caught in bhc::setup_nofile(): %s\n", e.what());
+        return false;
+    }
+}
+
 template<bool O3D, bool R3D> bool setup(
     const bhcInit &init, bhcParams<O3D> &params, bhcOutputs<O3D, R3D> &outputs)
 {
@@ -770,4 +849,22 @@ template BHC_API bool get_ssp<true, true>(
     bhcParams<true> &params, const VEC23<true> &x, float &sound_speed);
 #endif
 
+} // namespace bhc
+
+// --------------------
+// 显式模板实例化：让 bellhopcxxstatic 静态库包含这些符号，供 c_api 链接
+// --------------------
+namespace bhc {
+#if BHC_ENABLE_2D
+template bool BHC_API setup_nofile<false, false>(
+    const bhcInit &init, bhcParams<false> &params, bhcOutputs<false, false> &outputs);
+#endif
+#if BHC_ENABLE_NX2D
+template bool BHC_API setup_nofile<true, false>(
+    const bhcInit &init, bhcParams<true> &params, bhcOutputs<true, false> &outputs);
+#endif
+#if BHC_ENABLE_3D
+template bool BHC_API setup_nofile<true, true>(
+    const bhcInit &init, bhcParams<true> &params, bhcOutputs<true, true> &outputs);
+#endif
 } // namespace bhc
