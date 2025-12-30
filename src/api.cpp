@@ -382,13 +382,25 @@ template bool BHC_API setup<true, true>(
     const bhcInit &init, bhcParams<true> &params, bhcOutputs<true, true> &outputs);
 #endif
 
+#include <typeinfo>
+
 template<bool O3D> bool echo(bhcParams<O3D> &params)
 {
     try {
         module::ModulesList<O3D> modules;
+        int idx = 0;
         for(auto *m : modules.list()) {
-            m->Validate(params);
-            m->Echo(params);
+            try {
+                m->Validate(params);
+                m->Echo(params);
+            } catch(const std::exception &e) {
+                // 逐模块打印，便于定位是哪一个模块的 Validate/Echo 失败
+                EXTWARN(
+                    "Exception caught in bhc::echo(): module[%d]=%s: %s\n",
+                    idx, typeid(*m).name(), e.what());
+                return false;
+            }
+            ++idx;
         }
     } catch(const std::exception &e) {
         EXTWARN("Exception caught in bhc::echo(): %s\n", e.what());
