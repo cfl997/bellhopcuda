@@ -1,6 +1,6 @@
 #include "bhc/bhc_cpp_api.hpp"
-
 #include "bhc/bhc.hpp"
+#include "common.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -10,7 +10,8 @@
 
 namespace bhc_cpp {
 
-namespace {
+// ... (辅助函数: pad_right, set_title, set_runtype, set_beam, set_freq0, set_positions,
+// set_angles) ...
 
 static inline std::string pad_right(std::string s, size_t n)
 {
@@ -21,7 +22,6 @@ static inline std::string pad_right(std::string s, size_t n)
     s.append(n - s.size(), ' ');
     return s;
 }
-
 static inline void set_title(bhc::bhcParams<false> &params, const Title &t)
 {
     std::memset(params.Title, 0, sizeof(params.Title));
@@ -30,231 +30,166 @@ static inline void set_title(bhc::bhcParams<false> &params, const Title &t)
     if(s.size() >= sizeof(params.Title)) s.resize(sizeof(params.Title) - 1);
     std::memcpy(params.Title, s.data(), s.size());
 }
-
 static inline void set_runtype(bhc::bhcParams<false> &params, const RunType &rt)
 {
-    std::string s = pad_right(rt.value, 7);
-    std::memcpy(params.Beam->RunType, s.data(), 7);
+    char out[7];
+    for(int i = 0; i < 7; ++i) out[i] = ' ';
+    if(rt.use_raw) {
+        std::string s = pad_right(rt.raw, 7);
+        std::memcpy(out, s.data(), 7);
+    } else {
+        out[0] = static_cast<char>(rt.e.tl);
+        out[1] = static_cast<char>(rt.e.infl);
+        out[3] = static_cast<char>(rt.e.source);
+        out[4] = static_cast<char>(rt.e.grid);
+        out[5] = static_cast<char>(rt.e.dim);
+    }
+    std::memcpy(params.Beam->RunType, out, 7);
 }
-
 static inline void set_beam(bhc::bhcParams<false> &params, const Beam &b)
 {
     std::string t = pad_right(b.type, 4);
     std::memcpy(params.Beam->Type, t.data(), 4);
-
-    params.Beam->Box.x = static_cast<bhc::real>(b.box_x_m);
-    params.Beam->Box.y = static_cast<bhc::real>(b.box_z_m);
-
+    params.Beam->Box.x     = static_cast<bhc::real>(b.box_x_m);
+    params.Beam->Box.y     = static_cast<bhc::real>(b.box_z_m);
     params.Beam->rangeInKm = false;
-
     if(b.deltas_m > 0) {
         params.Beam->autoDeltas = false;
-        params.Beam->deltas = static_cast<bhc::real>(b.deltas_m);
+        params.Beam->deltas     = static_cast<bhc::real>(b.deltas_m);
     } else {
         params.Beam->autoDeltas = true;
-        params.Beam->deltas = 0;
+        params.Beam->deltas     = 0;
     }
-
     params.Beam->epsMultiplier = static_cast<bhc::real>(b.eps_multiplier);
 }
-
 static inline void set_freq0(bhc::bhcParams<false> &params, const Freq0 &f)
 {
     params.freqinfo->freq0 = static_cast<bhc::real>(f.hz);
 }
-
 static inline void set_positions(bhc::bhcParams<false> &params, const Positions2D &p)
 {
-    if(p.sz_m.empty()) throw Error("Positions2D.sz_m 不能为空");
-    if(p.rr_m.empty()) throw Error("Positions2D.rr_m 不能为空");
-    if(p.rz_m.empty()) throw Error("Positions2D.rz_m 不能为空");
-
-    bhc::extsetup_sz<false>(params, static_cast<int32_t>(p.sz_m.size()));
-    for(size_t i=0;i<p.sz_m.size();++i) params.Pos->Sz[i] = p.sz_m[i];
-
-    bhc::extsetup_rcvrranges<false>(params, static_cast<int32_t>(p.rr_m.size()));
-    for(size_t i=0;i<p.rr_m.size();++i) params.Pos->Rr[i] = p.rr_m[i];
-
-    bhc::extsetup_rcvrdepths<false>(params, static_cast<int32_t>(p.rz_m.size()));
-    for(size_t i=0;i<p.rz_m.size();++i) params.Pos->Rz[i] = p.rz_m[i];
-
+    if(p.sz_m.empty() || p.rr_m.empty() || p.rz_m.empty())
+        throw Error("Positions2D 向量不能为空");
+    bhc::extsetup_sz<false>(params, p.sz_m.size());
+    for(size_t i = 0; i < p.sz_m.size(); ++i) params.Pos->Sz[i] = p.sz_m[i];
+    bhc::extsetup_rcvrranges<false>(params, p.rr_m.size());
+    for(size_t i = 0; i < p.rr_m.size(); ++i) params.Pos->Rr[i] = p.rr_m[i];
+    bhc::extsetup_rcvrdepths<false>(params, p.rz_m.size());
+    for(size_t i = 0; i < p.rz_m.size(); ++i) params.Pos->Rz[i] = p.rz_m[i];
     params.Pos->RrInKm = p.rr_in_km;
-    params.Beam->rangeInKm = false;
 }
-
 static inline void set_angles(bhc::bhcParams<false> &params, const Angles &a)
 {
     if(a.alpha.empty()) throw Error("Angles.alpha 不能为空");
-    bhc::extsetup_rayelevations<false>(params, static_cast<int32_t>(a.alpha.size()));
+    bhc::extsetup_rayelevations<false>(params, a.alpha.size());
     params.Angles->alpha.inDegrees = a.alpha_in_degrees;
-    for(size_t i=0;i<a.alpha.size();++i) {
-        params.Angles->alpha.angles[i] = static_cast<bhc::real>(a.alpha[i]);
-    }
+    for(size_t i = 0; i < a.alpha.size(); ++i)
+        params.Angles->alpha.angles[i] = a.alpha[i];
 }
 
-static inline void set_ssp_1d(bhc::bhcParams<false> &params, const SSP1D &ssp)
+// 设置 SSP 深度网格和 1D 属性
+static inline void set_ssp_depth_grid(bhc::bhcParams<false> &params, const SSP1D &ssp)
 {
     if(ssp.pts.size() < 2) throw Error("SSP1D.pts 至少需要 2 个点");
 
-    params.ssp->Type = ssp.type;
     params.ssp->NPts = static_cast<int32_t>(ssp.pts.size());
     params.ssp->Nz   = params.ssp->NPts;
 
-    std::string au = pad_right(ssp.atten_unit, 2);
+    std::string au           = pad_right(ssp.atten_unit, 2);
     params.ssp->AttenUnit[0] = au[0];
     params.ssp->AttenUnit[1] = au[1];
 
-    for(int32_t i=0;i<params.ssp->NPts;++i) {
-        const auto &p = ssp.pts[static_cast<size_t>(i)];
-        params.ssp->z[i]      = static_cast<bhc::real>(p.z_m);
-        params.ssp->alphaR[i] = static_cast<bhc::real>(p.alphaR_mps);
-        params.ssp->betaR[i]  = static_cast<bhc::real>(p.betaR_mps);
-        params.ssp->rho[i]    = static_cast<bhc::real>(p.rho_gcm3);
-        params.ssp->alphaI[i] = static_cast<bhc::real>(p.alphaI);
-        params.ssp->betaI[i]  = static_cast<bhc::real>(p.betaI);
+    for(int32_t i = 0; i < params.ssp->NPts; ++i) {
+        const auto &p         = ssp.pts[i];
+        params.ssp->z[i]      = p.z_m;
+        params.ssp->alphaR[i] = p.alphaR_mps;
+        params.ssp->betaR[i]  = p.betaR_mps;
+        params.ssp->rho[i]    = p.rho_gcm3;
+        params.ssp->alphaI[i] = p.alphaI;
+        params.ssp->betaI[i]  = p.betaI;
     }
 
-    params.ssp->dirty = true;
-
+    params.ssp->dirty         = true;
     params.Bdry->Top.hs.Depth = params.ssp->z[0];
     params.Bdry->Bot.hs.Depth = params.ssp->z[params.ssp->NPts - 1];
 }
 
-static inline void write_boundary_curve_2d(
-    bhc::bhcParams<false> &params,
-    bhc::BdryInfoTopBot<false> &dst,
-    const Boundary2D &src,
-    bool is_top)
+// 设置 2D Range-Dependent SSP (Type 'Q')
+static inline void set_ssp_quad(
+    bhc::bhcParams<false> &params, const SSP1D &ssp_base, const SSPQuad &ssp_quad)
 {
-    if(src.r.size() != src.z.size()) {
-        throw Error("Boundary2D.r/z 长度不一致");
-    }
-    if(src.r.size() < 2) {
-        throw Error("Boundary2D 至少需要 2 个点");
-    }
+    const int32_t n_depths = ssp_base.pts.size();
+    const int32_t n_ranges = ssp_quad.ranges.size();
 
-    // 2D 下 type[0] 不能是 'R'
-    if(src.type.empty()) {
-        throw Error("Boundary2D.type 不能为空");
+    if(n_depths < 2 || n_ranges < 2) {
+        throw Error("SSP Type 'Q' 至少需要 2个深度和2个距离点");
     }
-    const char t0 = src.type[0];
-    const char t1 = (src.type.size() >= 2) ? src.type[1] : ' ';
-    if(t0 != 'C' && t0 != 'L') {
-        throw Error("Boundary2D.type[0] 在 2D 必须为 'C' 或 'L'");
-    }
-    if(!(t1 == 'S' || t1 == ' ' || t1 == 'L')) {
-        throw Error("Boundary2D.type[1] 在 2D 必须为 'S'/' '/'L'");
+    if(ssp_quad.ssp_matrix.size() != static_cast<size_t>(n_depths) * n_ranges) {
+        throw Error("SSPQuad.ssp_matrix 尺寸与深度/距离点数不匹配");
     }
 
-    // 写入 type 与单位
-    dst.type[0] = t0;
-    dst.type[1] = t1;
-    dst.rangeInKm = src.range_in_km;
-    dst.dirty = true;
+    // 调用底层 API 分配内存
+    bhc::extsetup_ssp_quad(params, n_depths, n_ranges);
 
-    const int32_t N = static_cast<int32_t>(src.r.size());
-    const bool ext = src.extend_to_infinity;
+    // 填充深度和距离向量
+    for(int i = 0; i < n_depths; ++i) params.ssp->z[i] = ssp_base.pts[i].z_m;
+    for(int i = 0; i < n_ranges; ++i) params.ssp->Seg.r[i] = ssp_quad.ranges[i];
 
-    // 分配：若扩展则 N+2，否则 N
-    const int32_t NPts = ext ? (N + 2) : N;
-    bhc::IORI2<false> np = NPts;
-    // 复用 bellhop 的 extsetup_altimetry/bathymetry 会根据 ISTOP 选择 top/bot，
-    // 这里为了不引入更多模板/实现，直接使用 trackallocate。
-    // 但我们不应该直接 trackallocate（由 bellhop 管理）。
-    // 因此：这里采用已有 extsetup_* API：
-    if(is_top) {
-        bhc::extsetup_altimetry<false>(params, np);
-    } else {
-        bhc::extsetup_bathymetry<false>(params, np);
+    // 填充声速矩阵 (cMat 是平铺的，布局与我们的 ssp_matrix 一致)
+    for(size_t i = 0; i < ssp_quad.ssp_matrix.size(); ++i) {
+        params.ssp->cMat[i] = ssp_quad.ssp_matrix[i];
     }
 
-    // 获取被 extsetup 分配好的指针（extsetup 内部会指向 params.bdinfo->top/bot）
-    // 注意：此处 dst.bd 已经是分配后的地址。
-
-    auto write_point = [&](int32_t i, double rr, double zz) {
-        // bd[i].x: vec2(range, depth)
-        dst.bd[i].x = bhc::vec2(static_cast<bhc::real>(rr), static_cast<bhc::real>(zz));
-    };
-
-    int32_t offset = 0;
-    if(ext) {
-        write_point(0, -src.extend_left, src.z.front());
-        offset = 1;
-    }
-
-    for(int32_t i=0;i<N;++i) {
-        write_point(i + offset, src.r[static_cast<size_t>(i)], src.z[static_cast<size_t>(i)]);
-        if(t1 == 'L') {
-            if(src.hs.size() != static_cast<size_t>(N)) {
-                throw Error("Boundary2D.type[1]=='L' 时必须提供 hs，且大小==点数");
-            }
-            auto &hs = dst.bd[i + offset].hs;
-            const auto &inhs = src.hs[static_cast<size_t>(i)];
-            hs.alphaR = static_cast<bhc::real>(inhs.alphaR_mps);
-            hs.betaR  = static_cast<bhc::real>(inhs.betaR_mps);
-            hs.rho    = static_cast<bhc::real>(inhs.rho_gcm3);
-            hs.alphaI = static_cast<bhc::real>(inhs.alphaI);
-            hs.betaI  = static_cast<bhc::real>(inhs.betaI);
-        }
-    }
-
-    if(ext) {
-        write_point(NPts - 1, src.extend_right, src.z.back());
-        if(t1 == 'L' && !src.hs.empty()) {
-            // 端点扩展 hs 复制边界相邻点（与 Read() 中扩展逻辑一致）
-            dst.bd[0].hs = dst.bd[1].hs;
-            dst.bd[NPts - 1].hs = dst.bd[NPts - 2].hs;
-        }
-    }
-
-    // 深度一致性约束（防止 Validate 报 rises/drops）
-    const double bdry_depth = is_top ? double(params.Bdry->Top.hs.Depth) : double(params.Bdry->Bot.hs.Depth);
-    for(int32_t i=0;i<NPts;++i) {
-        const double zz = dst.bd[i].x.y;
-        if(is_top) {
-            // 海面：z 应该等于 Top.hs.Depth（通常 0）或不低于它（取决于 NegTop 方向）；
-            // 这里先做强制对齐（更接近“平坦海面”），复杂曲线后续再放开。
-            (void)bdry_depth;
-        } else {
-            (void)bdry_depth;
-        }
-    }
+    params.ssp->rangeInKm = ssp_quad.ranges_in_km;
+    params.ssp->dirty     = true;
 }
 
+// ... (set_boundaries_2d, write_boundary_curve_2d) ...
+static inline void write_boundary_curve_2d(
+    bhc::bhcParams<false> &params, bhc::BdryInfoTopBot<false> &dst, const Boundary2D &src,
+    bool is_top)
+{
+    if(src.r.size() != src.z.size() || src.r.size() < 2)
+        throw Error("Boundary2D 点列非法");
+    const char t0 = src.type[0];
+    if(t0 != 'C' && t0 != 'L') throw Error("2D Boundary.type[0] 必须是 'C' 或 'L'");
+    dst.type[0]        = t0;
+    dst.type[1]        = (src.type.size() >= 2) ? src.type[1] : ' ';
+    dst.rangeInKm      = src.range_in_km;
+    dst.dirty          = true;
+    const int32_t N    = src.r.size();
+    const bool ext     = src.extend_to_infinity;
+    const int32_t NPts = ext ? (N + 2) : N;
+    if(is_top)
+        bhc::extsetup_altimetry<false>(params, NPts);
+    else
+        bhc::extsetup_bathymetry<false>(params, NPts);
+    auto write_point = [&](int32_t i, double rr, double zz) {
+        dst.bd[i].x = bhc::vec2(rr, zz);
+    };
+    int32_t offset = ext ? 1 : 0;
+    if(ext) write_point(0, -src.extend_left, src.z.front());
+    for(int32_t i = 0; i < N; ++i) write_point(i + offset, src.r[i], src.z[i]);
+    if(ext) write_point(NPts - 1, src.extend_right, src.z.back());
+}
 static inline void set_boundaries_2d(bhc::bhcParams<false> &params, const Boundaries2D &b)
 {
-    // bc
-    params.Bdry->Top.hs.bc = b.top.bc;
-    params.Bdry->Bot.hs.bc = b.bot.bc;
-
-    if(b.bot.bc == 'A') {
-        params.Bdry->Bot.hs.alphaR = static_cast<bhc::real>(b.bot.alphaR_mps);
-        params.Bdry->Bot.hs.betaR  = static_cast<bhc::real>(b.bot.betaR_mps);
-        params.Bdry->Bot.hs.rho    = static_cast<bhc::real>(b.bot.rho_gcm3);
-        params.Bdry->Bot.hs.alphaI = static_cast<bhc::real>(b.bot.alphaI);
-        params.Bdry->Bot.hs.betaI  = static_cast<bhc::real>(b.bot.betaI);
+    params.Bdry->Top.hs.bc = static_cast<char>(b.top.bc);
+    params.Bdry->Bot.hs.bc = static_cast<char>(b.bot.bc);
+    if(b.bot.bc == BoundaryCondition::Acoustic) {
+        params.Bdry->Bot.hs.alphaR = b.bot.alphaR_mps;
+        params.Bdry->Bot.hs.rho    = b.bot.rho_gcm3;
     }
-
-    // 调用者必须显式提供 top_curve/bot_curve 的点列（否则你就无法表达 ati/bty 文件语义）
-    if(b.top_curve.r.empty() || b.top_curve.z.empty()) {
-        throw Error("boundaries.top_curve 必须显式提供 r/z 点列（对应 .ati）");
-    }
-    if(b.bot_curve.r.empty() || b.bot_curve.z.empty()) {
-        throw Error("boundaries.bot_curve 必须显式提供 r/z 点列（对应 .bty）");
-    }
-
-    // 写入 top/bot 曲线到 bdinfo
+    if(b.top_curve.r.empty() || b.bot_curve.r.empty())
+        throw Error("Boundary curves 必须提供");
     write_boundary_curve_2d(params, params.bdinfo->top, b.top_curve, true);
     write_boundary_curve_2d(params, params.bdinfo->bot, b.bot_curve, false);
 }
 
-} // namespace
-
-TLResult2D compute_tl_2d(const Input2D &in)
+BHC_CPP_API TLResult2D compute_tl_2d(const Input2D &in)
 {
     bhc::bhcInit init{};
-    init.FileRoot = nullptr;
-
+    init.FileRoot    = nullptr;
     init.prtCallback = [](const char *m) {
         if(m) std::cerr << m;
     };
@@ -269,15 +204,28 @@ TLResult2D compute_tl_2d(const Input2D &in)
         throw Error("bhc::setup_nofile 失败");
     }
 
+    // --- 参数转换 ---
     set_title(params, in.title);
     set_freq0(params, in.freq0);
     set_runtype(params, in.run_type);
     set_beam(params, in.beam);
     set_positions(params, in.pos);
     set_angles(params, in.angles);
-    set_ssp_1d(params, in.ssp);
+
+    // 根据 options 决定 SSP 类型
+    bool is_quad_ssp = (in.options.find('Q') != std::string::npos);
+    if(is_quad_ssp) {
+        params.ssp->Type = 'Q';
+        set_ssp_depth_grid(params, in.ssp);        // 先用 1D SSP 设置深度网格
+        set_ssp_quad(params, in.ssp, in.ssp_quad); // 再用 2D SSP 填充数据
+    } else {
+        params.ssp->Type = static_cast<char>(in.ssp.type);
+        set_ssp_depth_grid(params, in.ssp);
+    }
+
     set_boundaries_2d(params, in.boundaries);
 
+    // --- 运行与结果提取 ---
     if(!bhc::echo<false>(params)) {
         bhc::finalize<false, false>(params, outputs);
         throw Error("bhc::echo 失败（请查看控制台输出）");
@@ -291,27 +239,19 @@ TLResult2D compute_tl_2d(const Input2D &in)
     TLResult2D out;
     out.width  = params.Pos->NRr;
     out.height = params.Pos->NRz;
-    out.tl_db.resize(static_cast<size_t>(out.width) * static_cast<size_t>(out.height));
+    out.tl_db.resize(out.width * out.height);
 
-    for(int ir=0; ir<out.width; ++ir) {
-        for(int iz=0; iz<out.height; ++iz) {
-            const auto *Pos = params.Pos;
-            const size_t idx = (((((size_t)0
-                * (size_t)Pos->NSx + (size_t)0)
-                * (size_t)Pos->NSy + (size_t)0)
-                * (size_t)Pos->Ntheta + (size_t)0)
-                * (size_t)Pos->NRz_per_range + (size_t)iz)
-                * (size_t)Pos->NRr + (size_t)ir;
-
-            auto p = outputs.uAllSources[idx];
-            float amp = std::sqrt(p.real()*p.real() + p.imag()*p.imag());
-            out.tl_db[static_cast<size_t>(iz)*static_cast<size_t>(out.width) + static_cast<size_t>(ir)]
-                = (amp > 0) ? -20.0f * std::log10(amp) : 200.0f;
+    for(int ir = 0; ir < out.width; ++ir) {
+        for(int iz = 0; iz < out.height; ++iz) {
+            size_t idx = bhc::GetFieldAddr(0, 0, 0, 0, iz, ir, params.Pos);
+            auto p     = outputs.uAllSources[idx];
+            float amp  = std::sqrt(p.real() * p.real() + p.imag() * p.imag());
+            out.tl_db[iz * out.width + ir] = (amp > 0) ? -20.0f * std::log10(amp)
+                                                       : 200.0f;
         }
     }
 
     bhc::finalize<false, false>(params, outputs);
     return out;
 }
-
 } // namespace bhc_cpp
