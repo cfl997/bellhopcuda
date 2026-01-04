@@ -112,22 +112,34 @@ public:
         case 'P': break;
         case 'S': break;
         case 'Q': {
-            // LP: This just checks for existence, moved actual open for reading
-            // to InitQuad.
-            std::ifstream SSPFile;
-            SSPFile.open(GetInternal(params)->FileRoot + ".ssp");
+            /* In nofile mode we already provided SSP data via memory. Skip file check. */
+            const auto &internal = *GetInternal(params);
+            const std::string fr = internal.FileRoot;
+            if(fr.empty()) break; // nofile mode
+            if(fr.rfind("error_incorrect_use_of_bellhopcxx", 0) == 0) {
+                // setup_nofile() uses this sentinel to indicate "do not read files"
+                // In this case, SSP data must already be provided via memory.
+                break;
+            }
+            std::ifstream SSPFile(fr + ".ssp");
             if(!SSPFile.good()) {
-                PRTFile << "SSPFile = " << GetInternal(params)->FileRoot << ".ssp\n";
+                PRTFile << "SSPFile = " << fr << ".ssp\n";
                 EXTERR(BHC_PROGRAMNAME " - ReadEnvironment: Unable to open the SSP file");
             }
         } break;
         case 'H': {
-            // LP: This just checks for existence, moved actual open for reading
-            // to InitHexahedral.
-            std::ifstream SSPFile;
-            SSPFile.open(GetInternal(params)->FileRoot + ".ssp");
+            /* In nofile mode we already provided SSP data via memory. Skip file check. */
+            const auto &internal = *GetInternal(params);
+            const std::string fr = internal.FileRoot;
+            if(fr.empty()) break; // nofile mode
+            if(fr.rfind("error_incorrect_use_of_bellhopcxx", 0) == 0) {
+                // setup_nofile() uses this sentinel to indicate "do not read files"
+                // In this case, SSP data must already be provided via memory.
+                break;
+            }
+            std::ifstream SSPFile(fr + ".ssp");
             if(!SSPFile.good()) {
-                PRTFile << "SSPFile = " << GetInternal(params)->FileRoot << ".ssp\n";
+                PRTFile << "SSPFile = " << fr << ".ssp\n";
                 EXTERR(BHC_PROGRAMNAME " - ReadEnvironment: Unable to open the SSP file");
             }
         } break;

@@ -78,13 +78,34 @@ static inline void set_positions(bhc::bhcParams<false> &params, const Positions2
     for(size_t i = 0; i < p.rz_m.size(); ++i) params.Pos->Rz[i] = p.rz_m[i];
     params.Pos->RrInKm = p.rr_in_km;
 }
-static inline void set_angles(bhc::bhcParams<false> &params, const Angles &a)
+static inline void set_angles(
+    bhc::bhcParams<false> &params, const Angles &a, int n_rays, double start_angle_deg,
+    double end_angle_deg)
 {
-    if(a.alpha.empty()) throw Error("Angles.alpha 不能为空");
-    bhc::extsetup_rayelevations<false>(params, a.alpha.size());
-    params.Angles->alpha.inDegrees = a.alpha_in_degrees;
-    for(size_t i = 0; i < a.alpha.size(); ++i)
-        params.Angles->alpha.angles[i] = a.alpha[i];
+    // 兼容两种输入方式：
+    // 1) 显式给 angles.alpha（优先）
+    // 2) angles.alpha 为空时，用 (n_rays, start_angle_deg, end_angle_deg) 生成
+    std::vector<double> alpha;
+    bool in_degrees = true;
+
+    if(!a.alpha.empty()) {
+        alpha = a.alpha;
+        in_degrees = a.alpha_in_degrees;
+    } else {
+        if(n_rays <= 0) throw Error("Angles.alpha 为空且 n_rays<=0，无法生成射线角");
+        alpha.resize(static_cast<size_t>(n_rays));
+        for(int i = 0; i < n_rays; ++i) {
+            double t = (n_rays == 1) ? 0.0 : double(i) / double(n_rays - 1);
+            alpha[static_cast<size_t>(i)] = start_angle_deg + (end_angle_deg - start_angle_deg) * t;
+        }
+        in_degrees = true; // env 的 START/END ANGLES 默认是度
+    }
+
+    bhc::extsetup_rayelevations<false>(params, static_cast<int32_t>(alpha.size()));
+    params.Angles->alpha.inDegrees = in_degrees;
+    for(size_t i = 0; i < alpha.size(); ++i) {
+        params.Angles->alpha.angles[i] = alpha[i];
+    }
 }
 
 // 设置 SSP 深度网格和 1D 属性
@@ -151,10 +172,10 @@ static inline void write_boundary_curve_2d(
 {
     if(src.r.size() != src.z.size() || src.r.size() < 2)
         throw Error("Boundary2D 点列非法");
-    const char t0 = src.type[0];
-    if(t0 != 'C' && t0 != 'L') throw Error("2D Boundary.type[0] 必须是 'C' 或 'L'");
+    const char t0 = static_cast<char>(src.interp);
+    if(t0 != 'C' && t0 != 'L') throw Error("2D Boundary.interp 必须是 'C' 或 'L'");
     dst.type[0]        = t0;
-    dst.type[1]        = (src.type.size() >= 2) ? src.type[1] : ' ';
+    dst.type[1]        = static_cast<char>(src.flag);
     dst.rangeInKm      = src.range_in_km;
     dst.dirty          = true;
     const int32_t N    = src.r.size();
@@ -172,14 +193,28 @@ static inline void write_boundary_curve_2d(
     for(int32_t i = 0; i < N; ++i) write_point(i + offset, src.r[i], src.z[i]);
     if(ext) write_point(NPts - 1, src.extend_right, src.z.back());
 }
+static inline void set_halfspace(bhc::BdryPtSmall &dst, const Halfspace &src)
+{
+    dst.hs.bc     = static_cast<char>(src.bc);
+    dst.hs.alphaR = static_cast<bhc::real>(src.alphaR_mps);
+    dst.hs.betaR  = static_cast<bhc::real>(src.betaR_mps);
+    dst.hs.rho    = static_cast<bhc::real>(src.rho_gcm3);
+    dst.hs.alphaI = static_cast<bhc::real>(src.alphaI);
+    dst.hs.betaI  = static_cast<bhc::real>(src.betaI);
+
+    // Opt[6]
+    std::string opt = pad_right(src.opt, 6);
+    std::memcpy(dst.hs.Opt, opt.data(), 6);
+
+    // Sigma（echo but usually not used）
+    dst.hsx.Sigma = static_cast<bhc::real>(src.sigma);
+}
+
 static inline void set_boundaries_2d(bhc::bhcParams<false> &params, const Boundaries2D &b)
 {
-    params.Bdry->Top.hs.bc = static_cast<char>(b.top.bc);
-    params.Bdry->Bot.hs.bc = static_cast<char>(b.bot.bc);
-    if(b.bot.bc == BoundaryCondition::Acoustic) {
-        params.Bdry->Bot.hs.alphaR = b.bot.alphaR_mps;
-        params.Bdry->Bot.hs.rho    = b.bot.rho_gcm3;
-    }
+    set_halfspace(params.Bdry->Top, b.top);
+    set_halfspace(params.Bdry->Bot, b.bot);
+
     if(b.top_curve.r.empty() || b.bot_curve.r.empty())
         throw Error("Boundary curves 必须提供");
     write_boundary_curve_2d(params, params.bdinfo->top, b.top_curve, true);
@@ -204,13 +239,27 @@ BHC_CPP_API TLResult2D compute_tl_2d(const Input2D &in)
         throw Error("bhc::setup_nofile 失败");
     }
 
+        // --- 强制 no-file 模式，杜绝任何文件读取 ---
+    // 1) 将 Top/Bottom 边界 Opt[6] 全清空，然后把 TopOpt 第 0 位设为 'V'
+    //    这样 TopOpt='V '，底层会直接走 Vacuum 分支，不会尝试读 SSP 文件。
+    std::memset(params.Bdry->Top.hs.Opt, ' ', sizeof(params.Bdry->Top.hs.Opt));
+    std::memset(params.Bdry->Bot.hs.Opt, ' ', sizeof(params.Bdry->Bot.hs.Opt));
+    params.Bdry->Top.hs.Opt[0] = 'V';
+
+    // 2) 标记 altimetry/bathymetry 已修改，确保 preprocess 重新计算但不读文件。
+    params.bdinfo->top.dirty = true;
+    params.bdinfo->bot.dirty = true;
+
     // --- 参数转换 ---
     set_title(params, in.title);
     set_freq0(params, in.freq0);
+    // 允许外部设置 top boundary 的 Opt，但为了 nofile 模式安全，不允许 Opt[0] 触发从文件读取 SSP。
+    // 如果用户需要 Q/H SSP，必须通过内存接口提供（ssp_quad/ssp_matrix）。
+    // 注：TopOpt::Validate 已在底层对 nofile 模式跳过 .ssp 文件存在性检查。
     set_runtype(params, in.run_type);
     set_beam(params, in.beam);
     set_positions(params, in.pos);
-    set_angles(params, in.angles);
+    set_angles(params, in.angles, in.n_rays, in.start_angle_deg, in.end_angle_deg);
 
     // 根据 options 决定 SSP 类型
     bool is_quad_ssp = (in.options.find('Q') != std::string::npos);

@@ -12,13 +12,13 @@
 // DLL 导出/导入宏
 // -----------------------------
 #if defined(_WIN32)
-#if defined(BHC_CPP_API_EXPORTS)
-#define BHC_CPP_API __declspec(dllexport)
+    #if defined(BHC_CPP_API_EXPORTS)
+        #define BHC_CPP_API __declspec(dllexport)
+    #else
+        #define BHC_CPP_API __declspec(dllimport)
+    #endif
 #else
-#define BHC_CPP_API __declspec(dllimport)
-#endif
-#else
-#define BHC_CPP_API __attribute__((visibility("default")))
+    #define BHC_CPP_API __attribute__((visibility("default")))
 #endif
 
 namespace bhc_cpp {
@@ -42,8 +42,7 @@ enum class SSPType : char {
     Quad        = 'Q'  /**< 2D Range-Dependent SSP (Quadrilateral) */
 };
 
-/** @enum BoundaryCondition 海面/海底边界条件类型 (对应 env 文件 TopOpt/BotOpt 的 BC 选项)
- */
+/** @enum BoundaryCondition 海面/海底边界条件类型 (对应 env 文件 TopOpt/BotOpt 的 BC 选项) */
 enum class BoundaryCondition : char {
     Vacuum   = 'V', /**< 真空 (完全反射) */
     Rigid    = 'R', /**< 刚性 (声压梯度为0) */
@@ -68,11 +67,10 @@ enum class Influence : char {
     CervenyCartesian        = 'C', /**< Cerveny Cartesian beams */
     CervenyRayCentered      = 'R', /**< Cerveny ray centered beams */
     SimpleGaussian          = 'S', /**< Simple gaussian beams */
-    GeomGaussianRayCentered = 'b', /**< Geometric gaussian beams in ray-centered
-                                      coordinates */
-    GeomGaussianCartesian = 'B', /**< Geometric gaussian beams in Cartesian coordinates */
-    GeomHatRayCentered    = 'g', /**< Geometric hat beams in ray-centered coordinates */
-    GeomHatCartesian      = 'G'  /**< Geometric hat beams in Cartesian coordinates */
+    GeomGaussianRayCentered = 'b', /**< Geometric gaussian beams in ray-centered coordinates */
+    GeomGaussianCartesian   = 'B', /**< Geometric gaussian beams in Cartesian coordinates */
+    GeomHatRayCentered      = 'g', /**< Geometric hat beams in ray-centered coordinates */
+    GeomHatCartesian        = 'G'  /**< Geometric hat beams in Cartesian coordinates */
 };
 
 /** @enum SourceModel 源模型 (对应 RunType[3]) */
@@ -129,7 +127,7 @@ struct Beam {
     std::string type      = "G";     /**< 影响函数类型 (4字符)，与 RunType[1] 配合使用 */
     double box_x_m        = 10000.0; /**< 射线追踪的最大水平距离 (m) */
     double box_z_m        = 200.0;   /**< 射线追踪的最大深度 (m) */
-    double deltas_m       = -1.0;    /**< 射线步长 (m)，<=0 表示自动选择 */
+    double deltas_m       = -1.0;    /**< 射线步长 (m)，<=0 表示自动选择；对应 env 里 RAY-STEP */
     double eps_multiplier = 1.0;     /**< 用于调整波束水平宽度的乘子 */
 };
 
@@ -160,16 +158,13 @@ struct SSP1DPoint {
 /** @struct SSP1D 对应 env 文件中的主 SSP 段 */
 struct SSP1D {
     SSPType type           = SSPType::CLinear; /**< 插值类型 */
-    std::string atten_unit = "W ";    /**< 衰减单位 (2字符)，如 "W "(dB/wavelength), "F
-                                         "(Thorp)等 */
-    std::vector<SSP1DPoint> pts = {}; /**< 声速剖面点，必须至少2个，且深度 z_m 须单调递增
-                                       */
+    std::string atten_unit = "W ";    /**< 衰减单位 (2字符)，如 "W "(dB/wavelength), "F "(Thorp)等 */
+    std::vector<SSP1DPoint> pts = {}; /**< 声速剖面点，必须至少2个，且深度 z_m 须单调递增 */
 };
 
 /** @struct SSPQuad 2D Range-Dependent SSP (Quadrilateral, Type 'Q') */
 struct SSPQuad {
-    std::vector<double> ranges = {}; /**< 各个声速剖面所在的距离 (单位由 ranges_in_km
-                                        控制) */
+    std::vector<double> ranges = {}; /**< 各个声速剖面所在的距离 (单位由 ranges_in_km 控制) */
     bool ranges_in_km = true;        /**< ranges 向量的单位是否为公里 */
     /**
      * @brief 声速矩阵 (m/s)，平铺存储。
@@ -180,14 +175,31 @@ struct SSPQuad {
     std::vector<double> ssp_matrix = {};
 };
 
+/** @enum BoundaryInterp 2D 边界曲线插值方式（对应 .ati/.bty 的首字符） */
+enum class BoundaryInterp : char {
+    Curvilinear = 'C', /**< Curvilinear / spline-like */
+    Linear      = 'L'  /**< Piecewise linear */
+};
+
+/**
+ * @enum BoundaryFlag 2D 边界曲线的第二字符标志位。
+ * 说明：bellhop 的第二字符在不同版本/模式下语义可能不同；
+ * 本封装默认不强行解释，只透传到内部。
+ */
+enum class BoundaryFlag : char {
+    None = ' ' /**< 无标志 */
+};
+
 /** @struct Boundary2D 对应 .ati/.bty 文件的2D边界曲线 */
 struct Boundary2D {
-    std::string type      = "LS"; /**< 边界类型 (2字符)，2D下 type[0] 必须是 'C' 或 'L' */
+    BoundaryInterp interp = BoundaryInterp::Linear;
+    BoundaryFlag flag     = BoundaryFlag::None;
+
     bool range_in_km      = false;   /**< 若为 true，则 r 中的单位为公里 */
     std::vector<double> r = {};      /**< 距离点，必须单调递增，至少2个点 */
     std::vector<double> z = {};      /**< 深度点，与 r 等长 */
-    std::vector<SSP1DPoint> hs = {}; /**< 仅当 type[1]=='L' 时使用，为每个点提供半空间参数
-                                      */
+    std::vector<SSP1DPoint> hs = {}; /**< 预留：当某些模式需要为每个点提供半空间参数 */
+
     bool extend_to_infinity = true;  /**< 是否自动将边界扩展到 +/- 无穷远 */
     double extend_left      = 1e9;   /**< 左侧扩展距离 (m 或 km，取决于 range_in_km) */
     double extend_right     = 1e9;   /**< 右侧扩展距离 (m 或 km，取决于 range_in_km) */
@@ -196,11 +208,17 @@ struct Boundary2D {
 /** @struct Halfspace 对应 env 文件中的声学半空间参数 */
 struct Halfspace {
     BoundaryCondition bc = BoundaryCondition::Rigid; /**< 边界条件类型 */
-    double alphaR_mps    = 1600.0;                   /**< 半空间压缩波声速 (m/s) */
-    double betaR_mps     = 0.0;                      /**< 半空间剪切波声速 (m/s) */
-    double rho_gcm3      = 1.8;                      /**< 半空间密度 (g/cm³) */
-    double alphaI        = 0.0;                      /**< 半空间压缩波衰减 */
-    double betaI         = 0.0;                      /**< 半空间剪切波衰减 */
+
+    // 对应 HSInfo
+    double alphaR_mps = 1600.0; /**< 半空间压缩波声速 (m/s) */
+    double betaR_mps  = 0.0;    /**< 半空间剪切波声速 (m/s) */
+    double rho_gcm3   = 1.8;    /**< 半空间密度 (g/cm³) */
+    double alphaI     = 0.0;    /**< 半空间压缩波衰减 */
+    double betaI      = 0.0;    /**< 半空间剪切波衰减 */
+
+    // 对应 HSInfo::Opt[6] 与 HSExtra::Sigma
+    std::string opt = ""; /**< TopOpt/BotOpt 附加选项（0~6 字符，将右侧填空到 6 字符） */
+    double sigma    = 0.0; /**< 粗糙度/散射相关参数（bellhop 读入并 echo，通常不参与物理计算） */
 };
 
 /** @struct Boundaries2D 对应 env 文件中的 TopOpt/BotOpt 及 .ati/.bty */
@@ -219,29 +237,27 @@ struct SBP {
 };
 
 /** @struct ReflectionCoef 对应 .brc/.trc 文件中的单行数据 */
-struct ReflectionCoef {
-    double theta = 0.0; /**< 角度 */
-    double r     = 0.0; /**< 反射系数模 */
-    double phi   = 0.0; /**< 反射系数相角 */
-};
+struct ReflectionCoef { double theta = 0.0; double r = 0.0; double phi = 0.0; };
 
 /** @struct ReflectionTable 对应 .brc/.trc 文件内容 */
-struct ReflectionTable {
-    bool in_degrees                   = true; /**< theta 的单位是否为度 */
-    std::vector<ReflectionCoef> table = {};
-};
+struct ReflectionTable { bool in_degrees = true; std::vector<ReflectionCoef> table = {}; };
 
 /** @struct Reflection 对应 env 文件中引用 .brc/.trc 的设置 */
-struct Reflection {
-    ReflectionTable top; /**< 海面反射系数 */
-    ReflectionTable bot; /**< 海底反射系数 */
-};
+struct Reflection { ReflectionTable top; ReflectionTable bot; };
 
 /** @struct Input2D 2D 计算的完整输入参数 */
 struct Input2D {
+    // ------------ env 兼容字段 -------------
+    int n_media = 1;               /**< NMEDIA */
     /** @brief 对应 env 文件的 OPTIONS1 字符串, 如 "QVMT" */
     std::string options = "";
 
+    /** @brief 若 angles.alpha 为空，则用 n_rays/start/end 自动生成等间隔射线角 */
+    int n_rays = 0;
+    double start_angle_deg = -90.0;
+    double end_angle_deg   = 90.0;
+
+    // ------------- 结构化主要字段 -------------
     Title title;
     Freq0 freq0;
     RunType run_type;
@@ -261,21 +277,16 @@ struct Input2D {
 
 /** @struct TLResult2D TL 计算结果 */
 struct TLResult2D {
-    int width  = 0;           /**< 距离方向的点数 */
-    int height = 0;           /**< 深度方向的点数 */
-    std::vector<float> tl_db; /**< TL值 (dB)，大小为 width*height，布局: tl_db[iz*width +
-                                 ir] */
+    int width = 0;  /**< 距离方向的点数 */
+    int height = 0; /**< 深度方向的点数 */
+    std::vector<float> tl_db; /**< TL值 (dB)，大小为 width*height，布局: tl_db[iz*width + ir] */
 
     /** @brief 安全地访问指定点的 TL 值 */
-    float at(int ir, int iz) const
-    {
-        return tl_db.at(
-            static_cast<size_t>(iz) * static_cast<size_t>(width)
-            + static_cast<size_t>(ir));
+    float at(int ir, int iz) const {
+        return tl_db.at(static_cast<size_t>(iz) * static_cast<size_t>(width) + static_cast<size_t>(ir));
     }
 };
 
-// namespace bhc_cpp
 // -----------------------------
 // 计算接口
 // -----------------------------
@@ -287,4 +298,5 @@ struct TLResult2D {
  * @throw bhc_cpp::Error 如果计算失败，将抛出异常，异常消息包含 Bellhop 内部的详细错误信息
  */
 BHC_CPP_API TLResult2D compute_tl_2d(const Input2D &in);
+
 } // namespace bhc_cpp
