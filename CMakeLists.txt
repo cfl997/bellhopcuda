@@ -61,4 +61,5 @@ option(BHC_SSP_ENABLE_ANALYTIC   "Enable analytic   2D/3D SSP (ssp->Type == 'A')
 
 add_subdirectory(config)
 add_subdirectory(c_api)
+add_subdirectory(TEDSbellhop)
 add_subdirectory(test)

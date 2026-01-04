@@ -169,8 +169,8 @@ struct SSPQuad {
     /**
      * @brief 声速矩阵 (m/s)，平铺存储。
      * 尺寸: ssp1d.pts.size() * ranges.size()
-     * 布局: Row-major, 即深度优先 (depth varies fastest)。
-     * ssp_matrix[i_depth * ranges.size() + i_range]
+     * 布局: range 优先（range varies fastest）。
+     * 即 ssp_matrix[i_depth * ranges.size() + i_range]
      */
     std::vector<double> ssp_matrix = {};
 };
