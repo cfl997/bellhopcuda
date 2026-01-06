@@ -68,6 +68,61 @@ if(MSVC)
             $<TARGET_FILE_DIR:example_teds_tl_cpp>)
 endif()
 
+add_executable(test_teds_parallel
+    test_teds_parallel.cpp
+)
+
+target_include_directories(test_teds_parallel PRIVATE
+    ${CMAKE_SOURCE_DIR}/TEDSbellhop/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_teds_parallel PRIVATE
+    TEDSbellhop
+)
+
+set_target_properties(test_teds_parallel PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)
+
+if(MSVC)
+    target_compile_options(test_teds_parallel PRIVATE /utf-8)
+
+    add_custom_command(TARGET test_teds_parallel POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:TEDSbellhop>
+            $<TARGET_FILE_DIR:test_teds_parallel>)
+endif()
+
+add_executable(test_teds_parallel_qssp
+    test_teds_parallel_qssp.cpp
+)
+
+target_include_directories(test_teds_parallel_qssp PRIVATE
+    ${CMAKE_SOURCE_DIR}/TEDSbellhop/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_teds_parallel_qssp PRIVATE
+    TEDSbellhop
+)
+
+set_target_properties(test_teds_parallel_qssp PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)
+
+if(MSVC)
+    target_compile_options(test_teds_parallel_qssp PRIVATE /utf-8)
+
+    add_custom_command(TARGET test_teds_parallel_qssp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:TEDSbellhop>
+            $<TARGET_FILE_DIR:test_teds_parallel_qssp>)
+endif()
+
+
 set_target_properties(example_tl_cpp PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES

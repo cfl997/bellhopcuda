@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -121,13 +122,20 @@ struct SSP1D {
 };
 
 // Type 'Q' 的 2D range-dependent SSP
+// 说明：
+// - bellhop Q-SSP 的网格由 (depths_m, ranges) 定义。
+// - TL 的输出网格（Positions2D.receiver_ranges/receiver_depths_m）可以与 Q-SSP 网格不同。
 struct SSPQuad {
-    std::vector<double> ranges = {}; // m 或 km
-    bool ranges_in_km = true;
+    // 距离节点（长度 Nr），单位由 ranges_in_km 决定
+    std::vector<float> ranges = {}; // m 或 km
+    bool ranges_in_km = false;
 
-    // 布局：range varies fastest
-    // c_mat[iz * n_range + ir]
-    std::vector<double> c_mat = {};
+    // 深度节点（长度 Nz），单位 m
+    std::vector<float> depths_m = {};
+
+    // 声速矩阵（m/s），尺寸 Nz*Nr
+    // 布局约定（range 优先）：c_mps[iz * Nr + ir]
+    std::vector<float> c_mps = {};
 };
 
 struct Halfspace {
@@ -181,8 +189,13 @@ struct TL2DInput {
     Angles angles;
 
     // SSP
+    // 说明：
+    // - 默认走 1D SSP：ssp
+    // - 若要使用 2D Q-SSP：
+    //   1) 填写 ssp_quad.depths_m / ssp_quad.ranges / ssp_quad.c_mps
+    //   2) options 里包含 'Q'（或直接留空，库内部在检测到 ssp_quad.c_mps 非空时会强制走 Q-SSP）
     SSP1D ssp;
-    SSPQuad ssp_quad; // options 包含 'Q' 时使用
+    SSPQuad ssp_quad;
 
     Boundaries2D boundaries;
 
@@ -202,23 +215,58 @@ struct TL2DResult {
 };
 
 // -----------------------------
+// 异步任务（Job）接口
+// -----------------------------
+
+struct TL2DJobImpl;
+
+class TEDSBELLHOP_API TL2DJob {
+public:
+    TL2DJob() = default;
+
+    // 可移动，不可拷贝
+    TL2DJob(TL2DJob&&) noexcept;
+    TL2DJob& operator=(TL2DJob&&) noexcept;
+    TL2DJob(const TL2DJob&) = delete;
+    TL2DJob& operator=(const TL2DJob&) = delete;
+
+    ~TL2DJob();
+
+    // 当前进度：0~100；未开始/不可用返回 -1
+    int progress() const;
+
+    // 是否完成（成功或失败都算完成）
+    bool ready() const;
+
+    // 若失败，返回错误信息；未失败返回空串
+    std::string error() const;
+
+    // 等待完成并取结果；如果任务失败会抛 tedsbellhop::Error
+    TL2DResult get();
+
+    // 主动等待完成（不取结果）
+    void wait();
+
+    // 是否持有有效任务
+    explicit operator bool() const noexcept { return static_cast<bool>(impl_); }
+
+private:
+    friend TEDSBELLHOP_API TL2DJob start_tl_2d(const TL2DInput& in);
+    explicit TL2DJob(std::shared_ptr<TL2DJobImpl> impl) : impl_(std::move(impl)) {}
+
+    std::shared_ptr<TL2DJobImpl> impl_;
+};
+
+// -----------------------------
 // API
 // -----------------------------
 
 TEDSBELLHOP_API void validate(const TL2DInput& in);
 
-// -----------------------------
-// 进度接口
-// -----------------------------
-// 说明：
-// - 进度是“当前线程/当前任务”的百分比（0~100）。
-// - 当没有正在运行的计算时，返回 -1。
-// - 这是一个最小接口：为了做到像 background.cpp 那样轮询进度，
-//   你需要用另一个线程调用 compute_tl_2d()，主线程里轮询 get_percent_progress()。
-TEDSBELLHOP_API int get_percent_progress();
-
-// 阻塞计算接口（与之前一致）
+// 同步（阻塞）接口
 TEDSBELLHOP_API TL2DResult compute_tl_2d(const TL2DInput& in);
 
-} // namespace tedsbellhop
+// 异步接口：启动计算并返回 job
+TEDSBELLHOP_API TL2DJob start_tl_2d(const TL2DInput& in);
 
+} // namespace tedsbellhop

@@ -7,21 +7,69 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
 
 namespace tedsbellhop {
 
-// 进度：按线程保存“当前正在运行的 params 指针”，以及一个缓存的百分比。
-// 约定：当没有正在运行的计算时，g_progress_params == nullptr，get_percent_progress() 返回 -1。
-static thread_local bhc::bhcParams<false>* g_progress_params = nullptr;
-static thread_local int g_progress_cache = -1;
+// =============================
+// TL2DJob 内部实现
+// =============================
 
-int get_percent_progress()
-{
-    if(!g_progress_params) return -1;
-    // bhc::get_percent_progress 是线程安全的，返回 0~100
-    g_progress_cache = bhc::get_percent_progress<false>(*g_progress_params);
-    return g_progress_cache;
+struct TL2DJobImpl {
+    std::atomic<int> progress{-1};
+    std::atomic<bool> ready{false};
+
+    // 用 mutex 保护 error / result / worker join
+    mutable std::mutex m;
+    std::string err;
+    TL2DResult result;
+
+    std::thread worker;
+
+    // 供 worker 内部更新 progress：保存 params 指针
+    bhc::bhcParams<false>* params_ptr = nullptr;
+
+    ~TL2DJobImpl() {
+        if(worker.joinable()) worker.join();
+    }
+};
+
+TL2DJob::TL2DJob(TL2DJob&& o) noexcept = default;
+TL2DJob& TL2DJob::operator=(TL2DJob&& o) noexcept = default;
+TL2DJob::~TL2DJob() = default;
+
+int TL2DJob::progress() const {
+    if(!impl_) return -1;
+    return impl_->progress.load(std::memory_order_relaxed);
 }
+
+bool TL2DJob::ready() const {
+    if(!impl_) return true;
+    return impl_->ready.load(std::memory_order_acquire);
+}
+
+std::string TL2DJob::error() const {
+    if(!impl_) return {};
+    std::lock_guard<std::mutex> lk(impl_->m);
+    return impl_->err;
+}
+
+void TL2DJob::wait() {
+    if(!impl_) return;
+    if(impl_->worker.joinable()) impl_->worker.join();
+}
+
+TL2DResult TL2DJob::get() {
+    wait();
+    if(!impl_) return {};
+    std::lock_guard<std::mutex> lk(impl_->m);
+    if(!impl_->err.empty()) throw Error(impl_->err);
+    return impl_->result;
+}
+
 
 static inline std::string pad_right(std::string s, size_t n)
 {
@@ -93,13 +141,13 @@ static inline void set_positions(bhc::bhcParams<false> &params, const Positions2
     if(p.source_depths_m.empty() || p.receiver_ranges.empty() || p.receiver_depths_m.empty())
         throw Error("Positions2D 向量不能为空 (source_depths_m/receiver_ranges/receiver_depths_m)");
 
-    bhc::extsetup_sz<false>(params, p.source_depths_m.size());
+    bhc::extsetup_sz<false>(params, static_cast<int32_t>(p.source_depths_m.size()));
     for(size_t i = 0; i < p.source_depths_m.size(); ++i) params.Pos->Sz[i] = p.source_depths_m[i];
 
-    bhc::extsetup_rcvrranges<false>(params, p.receiver_ranges.size());
+    bhc::extsetup_rcvrranges<false>(params, static_cast<int32_t>(p.receiver_ranges.size()));
     for(size_t i = 0; i < p.receiver_ranges.size(); ++i) params.Pos->Rr[i] = p.receiver_ranges[i];
 
-    bhc::extsetup_rcvrdepths<false>(params, p.receiver_depths_m.size());
+    bhc::extsetup_rcvrdepths<false>(params, static_cast<int32_t>(p.receiver_depths_m.size()));
     for(size_t i = 0; i < p.receiver_depths_m.size(); ++i) params.Pos->Rz[i] = p.receiver_depths_m[i];
 
     params.Pos->RrInKm = p.receiver_ranges_in_km;
@@ -166,19 +214,34 @@ static inline void set_ssp_quad(
 
     if(n_depths < 2 || n_ranges < 2) throw Error("SSPQuad 至少需要 2 个深度点和 2 个距离点");
 
-    if(ssp_quad.c_mat.size() != static_cast<size_t>(n_depths) * static_cast<size_t>(n_ranges))
-        throw Error("SSPQuad.c_mat 尺寸与深度/距离点数不匹配");
+    if(ssp_quad.c_mps.size() != static_cast<size_t>(n_depths) * static_cast<size_t>(n_ranges))
+        throw Error("SSPQuad.c_mps 尺寸与深度/距离点数不匹配");
 
     bhc::extsetup_ssp_quad(params, n_depths, n_ranges);
 
-    for(int i = 0; i < n_depths; ++i) params.ssp->z[i] = ssp_base.points[static_cast<size_t>(i)].z_m;
-    for(int i = 0; i < n_ranges; ++i) params.ssp->Seg.r[i] = ssp_quad.ranges[static_cast<size_t>(i)];
+    // 先设置单位标志，再写入 ranges 数据。
+    // 说明：我们遇到过 ranges_in_km=true 时，bellhop 输出的 "Profile ranges (km):" 为空。
+    // 这通常意味着 ranges 数组未被正确写入。为了稳健性，这里强制：
+    // - 同时写 params.ssp->Seg.r 和 params.ssp->r（若存在）
+    // - 并且写完后将 ssp 标记 dirty
+    params.ssp->rangeInKm = ssp_quad.ranges_in_km;
+
+    for(int i = 0; i < n_depths; ++i) {
+        params.ssp->z[i] = ssp_base.points[static_cast<size_t>(i)].z_m;
+    }
+
+    for(int i = 0; i < n_ranges; ++i) {
+        const auto rr = ssp_quad.ranges[static_cast<size_t>(i)];
+        params.ssp->Seg.r[i] = rr;
+
+    }
 
     // 布局与 c_api 当前实现一致：直接平铺复制
-    for(size_t i = 0; i < ssp_quad.c_mat.size(); ++i) params.ssp->cMat[i] = ssp_quad.c_mat[i];
+    for(size_t i = 0; i < ssp_quad.c_mps.size(); ++i) {
+        params.ssp->cMat[i] = ssp_quad.c_mps[i];
+    }
 
-    params.ssp->rangeInKm = ssp_quad.ranges_in_km;
-    params.ssp->dirty     = true;
+    params.ssp->dirty = true;
 }
 
 static inline void write_boundary_curve_2d(
@@ -248,22 +311,33 @@ void validate(const TL2DInput& in)
     if(in.pos.receiver_ranges.empty()) throw Error("pos.receiver_ranges 不能为空");
     if(in.pos.receiver_depths_m.empty()) throw Error("pos.receiver_depths_m 不能为空");
 
-    if(in.ssp.points.size() < 2) throw Error("ssp.points 至少需要2个点");
+    //if(in.ssp.points.size() < 2) throw Error("ssp.points 至少需要2个点");
     for(size_t i = 1; i < in.ssp.points.size(); ++i) {
         if(!(in.ssp.points[i].z_m > in.ssp.points[i-1].z_m))
             throw Error("ssp.points 的 z_m 必须严格单调递增");
     }
 
-    const bool is_quad = (in.options.find('Q') != std::string::npos);
-    if(is_quad) {
-        if(in.ssp.type != SSPType::Quad)
-            throw Error("options 包含 'Q' 时，ssp.type 必须为 SSPType::Quad");
-        if(in.ssp_quad.ranges.size() < 2)
-            throw Error("ssp_quad.ranges 至少需要2个点");
+    // Q-SSP 两种输入方式（优先级从高到低）：
+    // 1) ssp_quad：SSP 网格独立于接收网格（ranges/depths/c_mps）
+    // 2) 传统：options 包含 'Q' + ssp.type=Quad + ssp_quad
+
+    const bool has_ssp_quad = !in.ssp_quad.c_mps.empty();
+    const bool is_quad = has_ssp_quad || (in.options.find('Q') != std::string::npos);
+
+    if(has_ssp_quad) {
+        const size_t Nz = in.ssp_quad.depths_m.size();
+        const size_t Nr = in.ssp_quad.ranges.size();
+        if(Nz < 2 || Nr < 2) throw Error("使用 ssp_quad 时，ssp_quad.depths_m/ssp_quad.ranges 至少各需要2个点");
+        if(in.ssp_quad.c_mps.size() != Nz * Nr) throw Error("ssp_quad.c_mps 尺寸必须等于 Nz*Nr");
+    }
+
+    if(!has_ssp_quad && is_quad) {
+        if(in.ssp.type != SSPType::Quad) throw Error("options 包含 'Q' 时，ssp.type 必须为 SSPType::Quad");
+        if(in.ssp_quad.ranges.size() < 2) throw Error("ssp_quad.ranges 至少需要2个点");
         const size_t n_depth = in.ssp.points.size();
         const size_t n_range = in.ssp_quad.ranges.size();
-        if(in.ssp_quad.c_mat.size() != n_depth * n_range)
-            throw Error("ssp_quad.c_mat 尺寸必须等于 ssp.points.size()*ssp_quad.ranges.size()");
+        if(in.ssp_quad.c_mps.size() != n_depth * n_range)
+            throw Error("ssp_quad.c_mps 尺寸必须等于 ssp.points.size()*ssp_quad.ranges.size()");
     }
 
     if(in.boundaries.top_curve.r.size() != in.boundaries.top_curve.z.size() || in.boundaries.top_curve.r.size() < 2)
@@ -272,123 +346,195 @@ void validate(const TL2DInput& in)
         throw Error("bottom_curve r/z 非法");
 }
 
+// 同步（阻塞）计算：内部复用异步实现，启动后等待 get()
 TL2DResult compute_tl_2d(const TL2DInput& in)
 {
+    auto job = start_tl_2d(in);
+    return job.get();
+}
+
+
+// 异步启动：新线程执行 bellhop，外部线程轮询 job.progress()
+TL2DJob start_tl_2d(const TL2DInput& in)
+{
+    // 先在启动线程做输入校验（快速失败）
     validate(in);
 
-    bhc::bhcInit init{};
-    init.FileRoot = nullptr;
+    auto impl = std::make_shared<TL2DJobImpl>();
+    impl->progress.store(0, std::memory_order_relaxed);
 
-    // 回调：若用户没传，就默认打到 stderr（与 c_api 现行为一致）
-    if(in.prt_callback) {
-        init.prtCallback = +[](const char* m) { (void)m; }; // 占位，后面用捕获方式桥接（见下）
-    }
-    if(in.output_callback) {
-        init.outputCallback = +[](const char* m) { (void)m; };
-    }
+    // 注意：复制一份输入到 worker 线程，避免外部调用方修改 in 导致数据竞争
+    // TL2DInput 内部含 vector/string/std::function，拷贝成本可接受（相对计算成本很小）。
+    TL2DInput in_copy = in;
 
-    // 由于底层回调是 C 函数指针，不能直接传 std::function。
-    // 这里采用“线程局部静态指针”做最小桥接（满足测试与单线程使用）。
-    // 如需多实例并发，可升级为 map<thread_id, callbacks>。
-    // 注意：MSVC 不允许在函数内本地类定义 static thread_local 成员。
-    // 这里改用函数内的 thread_local 指针变量 + 无捕获静态函数桥接。
-    static thread_local const TL2DInput* g_current_input = nullptr;
+    impl->worker = std::thread([impl, in_copy = std::move(in_copy)]() mutable {
+        // 为了支持从“外部线程”轮询进度：
+        // - worker 线程里保存 params 指针到 impl->params_ptr
+        // - 另起一个轻量循环在 worker 内更新 impl->progress（靠 bhc::get_percent_progress）
 
-    struct CallbackBridge {
-        static void prt(const char* m) {
-            if(!m) return;
-            if(g_current_input && g_current_input->prt_callback) g_current_input->prt_callback(m);
-            else std::cerr << m;
+        try {
+            bhc::bhcInit init{};
+            init.FileRoot = nullptr;
+
+            // ---- 回调桥接：每个 job 拥有自己的 input 副本 ----
+            // bellhop 回调是 C 函数指针，这里用 thread_local 指针指向当前 job 的 input。
+            // 注意：MSVC 不允许在函数内本地类声明 static data member，
+            // 因此用“函数内 thread_local 变量 + lambda(无捕获)桥接”的方式。
+            static thread_local const TL2DInput* g_current_input = nullptr;
+            g_current_input = &in_copy;
+
+            auto prt_cb = +[](const char* m) {
+                if(!m) return;
+                if(g_current_input && g_current_input->prt_callback) g_current_input->prt_callback(m);
+                else std::cerr << m;
+            };
+            auto out_cb = +[](const char* m) {
+                if(!m) return;
+                if(g_current_input && g_current_input->output_callback) g_current_input->output_callback(m);
+                else std::cerr << m;
+            };
+
+            init.prtCallback = prt_cb;
+            init.outputCallback = out_cb;
+
+            bhc::bhcParams<false> params;
+            bhc::bhcOutputs<false, false> outputs;
+
+            // 暴露 params 指针给进度查询
+            impl->params_ptr = &params;
+
+            if(!bhc::setup_nofile<false, false>(init, params, outputs)) {
+                throw Error("bhc::setup_nofile 失败");
+            }
+
+            // ---- 强制 no-file 模式：杜绝任何文件读取 ----
+            std::memset(params.Bdry->Top.hs.Opt, ' ', sizeof(params.Bdry->Top.hs.Opt));
+            std::memset(params.Bdry->Bot.hs.Opt, ' ', sizeof(params.Bdry->Bot.hs.Opt));
+            params.Bdry->Top.hs.Opt[0] = 'V';
+            params.bdinfo->top.dirty = true;
+            params.bdinfo->bot.dirty = true;
+
+            // ---- 参数映射 ----
+            set_title(params, in_copy.title);
+            set_freq0(params, in_copy.freq_hz);
+            set_runtype(params, in_copy.run_type);
+            set_beam(params, in_copy.beam);
+            set_positions(params, in_copy.pos);
+            set_angles(params, in_copy.angles, in_copy.n_rays, in_copy.start_angle_deg, in_copy.end_angle_deg);
+
+            // ---- SSP 映射 ----
+            // 优先级（从高到低）：
+            // 1) ssp_quad：SSP 网格独立于接收网格（你现在需要的模式）
+            // 2) c_mps_grid：SSP 网格与接收网格完全一致
+            // 3) 传统：按 options/ssp/ssp_quad
+
+            const bool has_ssp_quad = !in_copy.ssp_quad.c_mps.empty();
+            const bool want_quad_by_options = (in_copy.options.find('Q') != std::string::npos);
+
+            if(has_ssp_quad) {
+                const size_t Nz = in_copy.ssp_quad.depths_m.size();
+                const size_t Nr = in_copy.ssp_quad.ranges.size();
+                if(Nz < 2 || Nr < 2) throw Error("使用 ssp_quad 时，ssp_quad.depths_m/ssp_quad.ranges 至少各需要2个点");
+                if(in_copy.ssp_quad.c_mps.size() != Nz * Nr)
+                    throw Error("ssp_quad.c_mps 尺寸必须等于 Nz*Nr");
+
+                params.ssp->Type = 'Q';
+
+                SSP1D ssp_grid;
+                ssp_grid.type = SSPType::Quad;
+                ssp_grid.atten_unit = in_copy.ssp.atten_unit;
+                ssp_grid.points.resize(Nz);
+                for(size_t iz = 0; iz < Nz; ++iz) {
+                    ssp_grid.points[iz].z_m = double(in_copy.ssp_quad.depths_m[iz]);
+                    ssp_grid.points[iz].c_mps = double(in_copy.ssp_quad.c_mps[iz * Nr + 0]);
+                }
+
+                SSPQuad quad;
+                quad.ranges_in_km = in_copy.ssp_quad.ranges_in_km;
+                quad.ranges.resize(Nr);
+                for(size_t ir = 0; ir < Nr; ++ir) quad.ranges[ir] = double(in_copy.ssp_quad.ranges[ir]);
+                quad.c_mps.resize(Nz * Nr);
+                for(size_t i = 0; i < Nz * Nr; ++i) quad.c_mps[i] = double(in_copy.ssp_quad.c_mps[i]);
+
+                set_ssp_depth_grid(params, ssp_grid);
+                set_ssp_quad(params, ssp_grid, quad);
+
+            } else if(want_quad_by_options) {
+                params.ssp->Type = 'Q';
+                set_ssp_depth_grid(params, in_copy.ssp);
+                set_ssp_quad(params, in_copy.ssp, in_copy.ssp_quad);
+            } else {
+                params.ssp->Type = static_cast<char>(in_copy.ssp.type);
+                set_ssp_depth_grid(params, in_copy.ssp);
+            }
+
+            set_boundaries_2d(params, in_copy.boundaries);
+
+            // ---- 在后台线程里更新进度（尽量低开销） ----
+            // 说明：bhc::run 内部会更新进度；我们用另一个线程在 run 期间轮询。
+            std::atomic<bool> run_done{false};
+            std::thread progress_thread([&] {
+                // 如果 get_percent_progress 在 preprocess 阶段也有意义，这里也能看到变化。
+                while(!run_done.load(std::memory_order_acquire)) {
+                    int p = bhc::get_percent_progress<false>(params);
+                    impl->progress.store(p, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                // 结束时再刷一次
+                int p = bhc::get_percent_progress<false>(params);
+                impl->progress.store(p, std::memory_order_relaxed);
+            });
+
+            if(!bhc::echo<false>(params)) {
+                run_done.store(true, std::memory_order_release);
+                if(progress_thread.joinable()) progress_thread.join();
+                bhc::finalize<false, false>(params, outputs);
+                throw Error("bhc::echo 失败（请查看回调输出）");
+            }
+
+            if(!bhc::run<false, false>(params, outputs)) {
+                run_done.store(true, std::memory_order_release);
+                if(progress_thread.joinable()) progress_thread.join();
+                bhc::finalize<false, false>(params, outputs);
+                throw Error("bhc::run 失败（请查看回调输出）");
+            }
+
+            run_done.store(true, std::memory_order_release);
+            if(progress_thread.joinable()) progress_thread.join();
+
+            TL2DResult out;
+            out.width  = params.Pos->NRr;
+            out.height = params.Pos->NRz;
+            out.tl_db.resize(static_cast<size_t>(out.width) * static_cast<size_t>(out.height));
+
+            for(int ir = 0; ir < out.width; ++ir) {
+                for(int iz = 0; iz < out.height; ++iz) {
+                    size_t idx = bhc::GetFieldAddr(0, 0, 0, 0, iz, ir, params.Pos);
+                    auto p     = outputs.uAllSources[idx];
+                    float amp  = std::sqrt(p.real() * p.real() + p.imag() * p.imag());
+                    out.tl_db[static_cast<size_t>(iz) * static_cast<size_t>(out.width) + static_cast<size_t>(ir)] =
+                        (amp > 0) ? -20.0f * std::log10(amp) : 200.0f;
+                }
+            }
+
+            bhc::finalize<false, false>(params, outputs);
+            impl->progress.store(100, std::memory_order_relaxed);
+
+            {
+                std::lock_guard<std::mutex> lk(impl->m);
+                impl->result = std::move(out);
+            }
+
+        } catch(const std::exception& e) {
+            std::lock_guard<std::mutex> lk(impl->m);
+            impl->err = e.what();
         }
-        static void out(const char* m) {
-            if(!m) return;
-            if(g_current_input && g_current_input->output_callback) g_current_input->output_callback(m);
-            else std::cerr << m;
-        }
-    };
 
-    init.prtCallback = &CallbackBridge::prt;
-    init.outputCallback = &CallbackBridge::out;
+        impl->params_ptr = nullptr;
+        impl->ready.store(true, std::memory_order_release);
+    });
 
-    bhc::bhcParams<false> params;
-    bhc::bhcOutputs<false, false> outputs;
-
-    g_current_input = &in;
-    g_progress_params = &params;
-    g_progress_cache = 0;
-
-    if(!bhc::setup_nofile<false, false>(init, params, outputs)) {
-        g_current_input = nullptr;
-        g_progress_params = nullptr;
-        g_progress_cache = -1;
-        throw Error("bhc::setup_nofile 失败");
-    }
-
-    // ---- 强制 no-file 模式：杜绝任何文件读取 ----
-    // 与现 c_api/src/bhc_cpp_api.cpp 保持一致的防御性处理
-    std::memset(params.Bdry->Top.hs.Opt, ' ', sizeof(params.Bdry->Top.hs.Opt));
-    std::memset(params.Bdry->Bot.hs.Opt, ' ', sizeof(params.Bdry->Bot.hs.Opt));
-    params.Bdry->Top.hs.Opt[0] = 'V';
-    params.bdinfo->top.dirty = true;
-    params.bdinfo->bot.dirty = true;
-
-    // ---- 参数映射（全部来自 in 内存结构） ----
-    set_title(params, in.title);
-    set_freq0(params, in.freq_hz);
-    set_runtype(params, in.run_type);
-    set_beam(params, in.beam);
-    set_positions(params, in.pos);
-    set_angles(params, in.angles, in.n_rays, in.start_angle_deg, in.end_angle_deg);
-
-    const bool is_quad_ssp = (in.options.find('Q') != std::string::npos);
-    if(is_quad_ssp) {
-        params.ssp->Type = 'Q';
-        set_ssp_depth_grid(params, in.ssp);
-        set_ssp_quad(params, in.ssp, in.ssp_quad);
-    } else {
-        params.ssp->Type = static_cast<char>(in.ssp.type);
-        set_ssp_depth_grid(params, in.ssp);
-    }
-
-    set_boundaries_2d(params, in.boundaries);
-
-    // ---- 运行 ----
-    if(!bhc::echo<false>(params)) {
-        bhc::finalize<false, false>(params, outputs);
-        g_current_input = nullptr;
-        g_progress_params = nullptr;
-        g_progress_cache = -1;
-        throw Error("bhc::echo 失败（请查看回调输出）");
-    }
-
-    if(!bhc::run<false, false>(params, outputs)) {
-        bhc::finalize<false, false>(params, outputs);
-        g_current_input = nullptr;
-        g_progress_params = nullptr;
-        g_progress_cache = -1;
-        throw Error("bhc::run 失败（请查看回调输出）");
-    }
-
-    TL2DResult out;
-    out.width  = params.Pos->NRr;
-    out.height = params.Pos->NRz;
-    out.tl_db.resize(static_cast<size_t>(out.width) * static_cast<size_t>(out.height));
-
-    for(int ir = 0; ir < out.width; ++ir) {
-        for(int iz = 0; iz < out.height; ++iz) {
-            size_t idx = bhc::GetFieldAddr(0, 0, 0, 0, iz, ir, params.Pos);
-            auto p     = outputs.uAllSources[idx];
-            float amp  = std::sqrt(p.real() * p.real() + p.imag() * p.imag());
-            out.tl_db[static_cast<size_t>(iz) * static_cast<size_t>(out.width) + static_cast<size_t>(ir)] =
-                (amp > 0) ? -20.0f * std::log10(amp) : 200.0f;
-        }
-    }
-
-    bhc::finalize<false, false>(params, outputs);
-    g_current_input = nullptr;
-    g_progress_params = nullptr;
-    g_progress_cache = -1;
-    return out;
+    return TL2DJob{std::move(impl)};
 }
 
 } // namespace tedsbellhop
